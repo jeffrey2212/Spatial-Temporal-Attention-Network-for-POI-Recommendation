@@ -72,7 +72,7 @@ class Trainer:
         self.start_epoch = record['epoch'][-1] if load else 1
         self.num_neg = 10
         self.interval = 1000
-        self.batch_size = 4 # N = 1
+        self.batch_size = 1 # N = 1
         self.learning_rate = 3e-3
         self.num_epoch = 100
         self.threshold = np.mean(record['acc_valid'][-1]) if load else 0  # 0 if not update
