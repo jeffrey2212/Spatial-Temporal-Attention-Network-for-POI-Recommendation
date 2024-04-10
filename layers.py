@@ -22,9 +22,10 @@ class Attn(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, self_attn, self_delta, traj_len):
-        N, L, M = self_delta.shape
-        self_delta = torch.sum(self_delta, -1).transpose(-1, -2)  # Squeeze and transpose the embed dimension
         
+        self_delta = torch.sum(self_delta, -1).transpose(-1, -2)  # Squeeze and transpose the embed dimension
+        print(self_delta.shape)
+        [N, L, M] = self_delta.shape
         candidates = torch.arange(1, self.loc_max + 1, device=self_delta.device).long()
         candidates = candidates.unsqueeze(0).expand(N, -1)  # Expand to match batch size
         emb_candidates = self.emb_loc(candidates)  # Get embeddings for each candidate
