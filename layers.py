@@ -16,34 +16,23 @@ def to_npy(x):
 class Attn(nn.Module):
     def __init__(self, emb_loc, loc_max, dropout=0.1):
         super(Attn, self).__init__()
-        self.value = nn.Linear(loc_max, 1, bias=False)  # Assuming 'max_len' is 'loc_max'
+        self.value = nn.Linear(max_len, 1, bias=False)
         self.emb_loc = emb_loc
         self.loc_max = loc_max
-        self.dropout = nn.Dropout(dropout)
 
     def forward(self, self_attn, self_delta, traj_len):
-        
-        self_delta = torch.sum(self_delta, -1).transpose(-1, -2)  # Squeeze and transpose the embed dimension
-        print(self_delta.shape)
+        # self_attn (N, M, emb), candidate (N, L, emb), self_delta (N, M, L, emb), len [N]
+        self_delta = torch.sum(self_delta, -1).transpose(-1, -2)  # squeeze the embed dimension
         [N, L, M] = self_delta.shape
-        candidates = torch.arange(1, self.loc_max + 1, device=self_delta.device).long()
-        candidates = candidates.unsqueeze(0).expand(N, -1)  # Expand to match batch size
-        emb_candidates = self.emb_loc(candidates)  # Get embeddings for each candidate
-        
-        # Efficient masking inspired by 'LocationAttention'
-        mask = torch.arange(self.loc_max, device=self_delta.device).unsqueeze(0) >= traj_len.unsqueeze(1)
-        mask = mask.unsqueeze(1)  # Adjust mask shape for broadcasting
+        candidates = torch.linspace(1, int(self.loc_max), int(self.loc_max)).long()  # (L)
+        candidates = candidates.unsqueeze(0).expand(N, -1).to(device)  # (N, L)
+        emb_candidates = self.emb_loc(candidates)  # (N, L, emb)
+        attn = torch.mul(torch.bmm(emb_candidates, self_attn.transpose(-1, -2)), self_delta)  # (N, L, M)
+        # pdb.set_trace()
+        attn_out = self.value(attn).view(N, L)  # (N, L)
+        # attn_out = F.log_softmax(attn_out, dim=-1)  # ignore if cross_entropy_loss
 
-        # Apply the mask to self_delta
-        self_delta = self_delta.masked_fill(mask, float('-inf'))  # Fill masked areas with '-inf' to ignore them in softmax
-
-        attn_weights = torch.bmm(emb_candidates, self_attn.transpose(-1, -2))  # Calculate raw attention weights
-        attn_weights = F.softmax(self_delta, dim=-1)  # Apply softmax to obtain normalized attention weights
-        
-        attn_out = torch.bmm(attn_weights, self.value(emb_candidates).transpose(-1, -2))
-        attn_out = attn_out.squeeze(-1)  # Remove the last dimension after bmm
-        
-        return attn_out
+        return attn_out  # (N, L)
 
 
 
