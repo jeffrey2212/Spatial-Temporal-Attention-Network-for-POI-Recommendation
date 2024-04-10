@@ -5,7 +5,7 @@ from torch import optim
 import torch.utils.data as data
 from tqdm import tqdm
 from models import *
-
+import multiprocessing as mp
 
 def calculate_acc(prob, label):
     # log_prob (N, L), label (N), batch_size [*M]
@@ -71,7 +71,7 @@ class Trainer:
         self.start_epoch = record['epoch'][-1] if load else 1
         self.num_neg = 10
         self.interval = 1000
-        self.batch_size = 1 # N = 1
+        self.batch_size = 8 # N = 1
         self.learning_rate = 3e-3
         self.num_epoch = 100
         self.threshold = np.mean(record['acc_valid'][-1]) if load else 0  # 0 if not update
@@ -81,7 +81,7 @@ class Trainer:
             trajs, mat1, mat2s, mat2t, labels, lens
         # nn.cross_entropy_loss counts target from 0 to C - 1, so we minus 1 here.
         self.dataset = DataSet(self.traj, self.mat1, self.mat2t, self.label-1, self.len)
-        self.data_loader = data.DataLoader(dataset=self.dataset, batch_size=self.batch_size, shuffle=False)
+        self.data_loader = data.DataLoader(dataset=self.dataset, batch_size=self.batch_size, shuffle=False, num_workers=4)
 
     def train(self):
         # set optimizer
@@ -206,6 +206,7 @@ class Trainer:
 
 
 if __name__ == '__main__':
+    mp.set_start_method('spawn', force=True)
     # load data
     dname = 'NYC'
     file = open('./data/' + dname + '_data.pkl', 'rb')
