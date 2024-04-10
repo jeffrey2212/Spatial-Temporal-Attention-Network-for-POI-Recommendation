@@ -6,6 +6,7 @@ import torch.utils.data as data
 from tqdm import tqdm
 from models import *
 import multiprocessing as mp
+from torch.cuda.amp import GradScaler, autocast
 
 def calculate_acc(prob, label):
     # log_prob (N, L), label (N), batch_size [*M]
@@ -71,17 +72,18 @@ class Trainer:
         self.start_epoch = record['epoch'][-1] if load else 1
         self.num_neg = 10
         self.interval = 1000
-        self.batch_size = 8 # N = 1
+        self.batch_size = 4 # N = 1
         self.learning_rate = 3e-3
         self.num_epoch = 100
         self.threshold = np.mean(record['acc_valid'][-1]) if load else 0  # 0 if not update
 
+        self.scaler = GradScaler()
         # (NUM, M, 3), (NUM, M, M, 2), (L, L), (NUM, M, M), (NUM, M), (NUM) i.e. [*M]
         self.traj, self.mat1, self.mat2s, self.mat2t, self.label, self.len = \
             trajs, mat1, mat2s, mat2t, labels, lens
         # nn.cross_entropy_loss counts target from 0 to C - 1, so we minus 1 here.
         self.dataset = DataSet(self.traj, self.mat1, self.mat2t, self.label-1, self.len)
-        self.data_loader = data.DataLoader(dataset=self.dataset, batch_size=self.batch_size, shuffle=False, num_workers=4)
+        self.data_loader = data.DataLoader(dataset=self.dataset, batch_size=self.batch_size, shuffle=False, num_workers=2)
 
     def train(self):
         # set optimizer
@@ -101,7 +103,7 @@ class Trainer:
                 # first, try batch_size = 1 and mini_batch = 1
 
                 input_mask = torch.zeros((self.batch_size, max_len, 3), dtype=torch.long).to(device)
-                m1_mask = torch.zeros((self.batch_size, max_len, max_len, 2), dtype=torch.float32).to(device)
+                m1_mask = torch.zeros((self.batch_size, max_len, max_len, 2), dtype=torch.float16).to(device)
                 for mask_len in range(1, person_traj_len[0]+1):  # from 1 -> len
                     # if mask_len != person_traj_len[0]:
                     #     continue
@@ -114,29 +116,45 @@ class Trainer:
                     train_label = person_label[:, mask_len - 1]  # (N)
                     train_len = torch.zeros(size=(self.batch_size,), dtype=torch.long).to(device) + mask_len
 
-                    prob = self.model(train_input, train_m1, self.mat2s, train_m2t, train_len)  # (N, L)
+                    # Reset gradients
+                    optimizer.zero_grad()
+                
+                    # Use autocast for the forward pass
+                    with autocast():
+                        prob = self.model(train_input, train_m1, self.mat2s, train_m2t, train_len)  # (N, L)
 
-                    if mask_len <= person_traj_len[0] - 2:  # only training
-                        # nn.utils.clip_grad_norm_(self.model.parameters(), 10)
-                        prob_sample, label_sample = sampling_prob(prob, train_label, self.num_neg)
-                        loss_train = F.cross_entropy(prob_sample, label_sample)
-                        loss_train.backward()
-                        optimizer.step()
-                        optimizer.zero_grad()
-                        scheduler.step()
+                        if mask_len <= person_traj_len[0] - 2:  # only training
+                            # nn.utils.clip_grad_norm_(self.model.parameters(), 10)
+                            prob_sample, label_sample = sampling_prob(prob, train_label, self.num_neg)
+                            loss_train = F.cross_entropy(prob_sample, label_sample)
+                                                    # Scale the loss and call backward() to create scaled gradients
+                            self.scaler.scale(loss_train).backward()
+                            
+                            # Call scaler.step() first, then scaler.update()
+                            self.scaler.step(optimizer)
+                            self.scaler.update()
+                            
+                            optimizer.zero_grad()
+                            scheduler.step()
+                            #loss_train.backward()
+                            #optimizer.step()
+                            #optimizer.zero_grad()
+                            #scheduler.step()
 
-                    elif mask_len == person_traj_len[0] - 1:  # only validation
-                        valid_size += person_input.shape[0]
-                        # v_prob_sample, v_label_sample = sampling_prob(prob_valid, valid_label, self.num_neg)
-                        # loss_valid += F.cross_entropy(v_prob_sample, v_label_sample, reduction='sum')
-                        acc_valid += calculate_acc(prob, train_label)
+                        elif mask_len == person_traj_len[0] - 1:  # only validation
+                            valid_size += person_input.shape[0]
+                            # v_prob_sample, v_label_sample = sampling_prob(prob_valid, valid_label, self.num_neg)
+                            # loss_valid += F.cross_entropy(v_prob_sample, v_label_sample, reduction='sum')
+                            acc_valid += calculate_acc(prob, train_label)
 
-                    elif mask_len == person_traj_len[0]:  # only test
-                        test_size += person_input.shape[0]
-                        # v_prob_sample, v_label_sample = sampling_prob(prob_valid, valid_label, self.num_neg)
-                        # loss_valid += F.cross_entropy(v_prob_sample, v_label_sample, reduction='sum')
-                        acc_test += calculate_acc(prob, train_label)
+                        elif mask_len == person_traj_len[0]:  # only test
+                            test_size += person_input.shape[0]
+                            # v_prob_sample, v_label_sample = sampling_prob(prob_valid, valid_label, self.num_neg)
+                            # loss_valid += F.cross_entropy(v_prob_sample, v_label_sample, reduction='sum')
+                            acc_test += calculate_acc(prob, train_label)
+                    
 
+                
                 bar.update(self.batch_size)
             bar.close()
 
@@ -173,7 +191,7 @@ class Trainer:
                 # first, try batch_size = 1 and mini_batch = 1
 
                 input_mask = torch.zeros((self.batch_size, max_len, 3), dtype=torch.long).to(device)
-                m1_mask = torch.zeros((self.batch_size, max_len, max_len, 2), dtype=torch.float32).to(device)
+                m1_mask = torch.zeros((self.batch_size, max_len, max_len, 2), dtype=torch.float16).to(device)
                 for mask_len in range(1, person_traj_len[0] + 1):  # from 1 -> len
                     # if mask_len != person_traj_len[0]:
                     #     continue
